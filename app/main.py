@@ -46,7 +46,10 @@ def get_result_by_url(url: str):
     if not task_id:
         raise HTTPException(status_code=404, detail="No task found for this URL")
 
-    job = Job.fetch(task_id, connection=queue_conn)
+    try:
+        job = Job.fetch(task_id, connection=queue_conn)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Task result not found or expired")
 
     if job.is_finished:
         return {"status": "completed", "result": job.result}
