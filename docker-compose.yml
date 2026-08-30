@@ -1,0 +1,5 @@
+services:
+  crawler:
+    build: .
+    volumes:
+      - ./output:/app/output
