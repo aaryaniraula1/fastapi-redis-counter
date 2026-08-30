@@ -3,6 +3,16 @@ services:
     build: .
     ports:
       - "8000:8000"
+    volumes:
+      - ./app:/app/app
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: rq worker --url redis://redis:6379
+    volumes:
+      - ./app:/app/app
     depends_on:
       - redis
 

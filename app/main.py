@@ -1,46 +1,56 @@
 from fastapi import FastAPI, HTTPException
-import requests
-from bs4 import BeautifulSoup
 import redis
-import json
+from rq import Queue
+from rq.job import Job
+from app.worker import process_url
 
 app = FastAPI()
 
 cache = redis.Redis(host="redis", port=6379, decode_responses=True)
+queue_conn = redis.Redis(host="redis", port=6379)
+queue = Queue(connection=queue_conn)
 
 
-@app.get("/api/scrape/{url:path}")
-def scrape(url: str):
-    cached_result = cache.get(url)
+@app.post("/api/scrape/{url:path}")
+def start_scrape(url: str):
+    existing_task_id = cache.get(f"url_task:{url}")
 
-    if cached_result:
-        print("CACHE HIT")
-        return json.loads(cached_result)
+    if existing_task_id:
+        return {"task_id": existing_task_id, "status": "already_processing_or_done"}
 
-    print("CACHE MISS")
+    job = queue.enqueue(process_url, url)
+    cache.setex(f"url_task:{url}", 3600, job.id)
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    return {"task_id": job.id, "status": "processing"}
 
+
+@app.get("/api/result/{task_id}")
+def get_result_by_task_id(task_id: str):
     try:
-        response = requests.get(url, headers=headers, timeout=5)
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Could not fetch URL: {e}")
+        job = Job.fetch(task_id, connection=queue_conn)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Task not found")
 
-    soup = BeautifulSoup(response.text, "html.parser")
+    if job.is_finished:
+        return {"status": "completed", "result": job.result}
+    elif job.is_failed:
+        return {"status": "failed"}
+    else:
+        return {"status": "processing"}
 
-    title_tag = soup.find("title")
-    title = title_tag.text.strip() if title_tag else None
 
-    description_tag = soup.find("meta", attrs={"name": "description"})
-    description = description_tag["content"].strip() if description_tag else None
+@app.get("/api/result")
+def get_result_by_url(url: str):
+    task_id = cache.get(f"url_task:{url}")
 
-    result = {
-        "url": url,
-        "title": title,
-        "description": description
-    }
+    if not task_id:
+        raise HTTPException(status_code=404, detail="No task found for this URL")
 
-    cache.setex(url, 300, json.dumps(result))
+    job = Job.fetch(task_id, connection=queue_conn)
 
-    return result
+    if job.is_finished:
+        return {"status": "completed", "result": job.result}
+    elif job.is_failed:
+        return {"status": "failed"}
+    else:
+        return {"status": "processing"}
