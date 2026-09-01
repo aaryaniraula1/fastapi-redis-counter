@@ -568,7 +568,6 @@ def find_relevant_pages(
         "background",
         "formation",
         "our-team",
-        
     ]
 
     pages = []
@@ -671,8 +670,7 @@ def process_site(
                 "parent": parent["title"],
                 "parent_domain": parent["domain"],
                 "parent_source": actual_url,
-                "parent_evidence": header_text,
-                "relationship": "header_hierarchy",
+                "relationship": "parent_identified_from_header",
                 "status": "parent_verified",
             }
 
@@ -736,7 +734,6 @@ def process_site(
                 "parent": parent["title"],
                 "parent_domain": parent["domain"],
                 "parent_source": page,
-                "parent_evidence": text[:3000],
                 "relationship": "page_hierarchy",
                 "status": "parent_verified",
             }
@@ -752,7 +749,6 @@ def process_site(
         "parent": None,
         "parent_domain": None,
         "parent_source": None,
-        "parent_evidence": None,
         "relationship": None,
         "status": "parent_not_verified",
     }
@@ -853,4 +849,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
