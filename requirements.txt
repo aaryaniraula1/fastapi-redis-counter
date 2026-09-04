@@ -1,2 +1,5 @@
 scrapy
 beautifulsoup4
+requests
+google-genai
+pydantic

@@ -1,0 +1,42 @@
+[
+  {
+    "domain": "cfsc.gov.np",
+    "name": "Community Forest Study Center",
+    "parent_name": "Department of Forests and Soil Conservation",
+    "parent_domain": "dofsc.gov.np",
+    "parent_url": "https://dofsc.gov.np/",
+    "status": "verified"
+  },
+  {
+    "domain": "dofsc.gov.np",
+    "name": "Department of Forests and Soil Conservation",
+    "parent_name": "Ministry of Agriculture, Forest and Environment",
+    "parent_domain": "moafe.gov.np",
+    "parent_url": "https://moafe.gov.np/",
+    "status": "verified"
+  },
+  {
+    "domain": "fpdb.gov.np",
+    "name": "Forest Product Development Committee",
+    "parent_name": "Ministry of Agriculture, Forest and Environment",
+    "parent_domain": "moafe.gov.np",
+    "parent_url": "https://moafe.gov.np/",
+    "status": "verified"
+  },
+  {
+    "domain": "frtc.gov.np",
+    "name": "Forest Research and Training Centre",
+    "parent_name": "Ministry of Forests and Environment",
+    "parent_domain": "mofe.gov.np",
+    "parent_url": "https://mofe.gov.np/",
+    "status": "verified"
+  },
+  {
+    "domain": "redd.gov.np",
+    "name": "REDD Implementation Centre",
+    "parent_name": "Ministry of Agriculture, Forest and Environment",
+    "parent_domain": "moafe.gov.np",
+    "parent_url": "https://moafe.gov.np/",
+    "status": "verified"
+  }
+]
