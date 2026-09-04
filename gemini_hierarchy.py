@@ -1,12 +1,13 @@
 import argparse
+import asyncio
 import json
 import os
 import re
+import ssl
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import requests
-import urllib3
+import httpx
 from bs4 import BeautifulSoup
 from pydantic import BaseModel
 
@@ -18,6 +19,7 @@ INPUT_FILE = OUTPUT_DIR / "discovered_sites.json"
 OUTPUT_FILE = OUTPUT_DIR / "final_hierarchy.json"
 
 MODEL = "gemini-3.7-flash"
+MAX_CONCURRENT_REQUESTS = 5
 
 TEST_DOMAINS = [
     "cfsc.gov.np",
@@ -33,8 +35,6 @@ HEADERS = {
         "AppleWebKit/537.36 Chrome/152.0 Safari/537.36"
     )
 }
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class OrganisationResult(BaseModel):
@@ -53,7 +53,7 @@ def clean_text(text):
 
 
 def normalize_domain(value):
-    value = clean_text(value).lower()
+    value = clean_text(str(value or "")).lower()
 
     if not value:
         return ""
@@ -130,34 +130,41 @@ def load_sites():
     return sites
 
 
-def request_page(url):
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=10,
-            allow_redirects=True,
-        )
-        response.raise_for_status()
-        return response
-
-    except requests.RequestException:
+async def request_page(
+    secure_client,
+    insecure_client,
+    semaphore,
+    url,
+):
+    async with semaphore:
         try:
-            response = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=10,
-                allow_redirects=True,
-                verify=False,
-            )
+            response = await secure_client.get(url)
             response.raise_for_status()
             return response
 
-        except requests.RequestException:
+        except (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.ReadTimeout,
+            ssl.SSLError,
+        ):
+            try:
+                response = await insecure_client.get(url)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError:
+                return None
+
+        except httpx.HTTPError:
             return None
 
 
-def fetch_homepage(domain):
+async def fetch_homepage(
+    secure_client,
+    insecure_client,
+    semaphore,
+    domain,
+):
     urls = [
         f"https://{domain}/",
         f"https://www.{domain}/",
@@ -166,7 +173,12 @@ def fetch_homepage(domain):
     ]
 
     for url in urls:
-        response = request_page(url)
+        response = await request_page(
+            secure_client,
+            insecure_client,
+            semaphore,
+            url,
+        )
 
         if response is not None:
             return response
@@ -264,7 +276,12 @@ def extract_branding(response):
     }
 
 
-def find_english_page(response):
+async def find_english_page(
+    secure_client,
+    insecure_client,
+    semaphore,
+    response,
+):
     soup = make_soup(response)
 
     original_domain = normalize_domain(
@@ -301,14 +318,19 @@ def find_english_page(response):
             continue
 
         url = urljoin(
-            response.url,
+            str(response.url),
             href,
         )
 
         if normalize_domain(url) != original_domain:
             continue
 
-        page = request_page(url)
+        page = await request_page(
+            secure_client,
+            insecure_client,
+            semaphore,
+            url,
+        )
 
         if page is not None:
             return page
@@ -316,8 +338,18 @@ def find_english_page(response):
     return None
 
 
-def collect_evidence(domain):
-    response = fetch_homepage(domain)
+async def collect_evidence(
+    secure_client,
+    insecure_client,
+    semaphore,
+    domain,
+):
+    response = await fetch_homepage(
+        secure_client,
+        insecure_client,
+        semaphore,
+        domain,
+    )
 
     if response is None:
         raise RuntimeError(
@@ -328,8 +360,11 @@ def collect_evidence(domain):
         response
     )
 
-    english_page = find_english_page(
-        response
+    english_page = await find_english_page(
+        secure_client,
+        insecure_client,
+        semaphore,
+        response,
     )
 
     if english_page is not None:
@@ -351,7 +386,12 @@ def collect_evidence(domain):
     return original
 
 
-def get_candidate_identity(site):
+async def get_candidate_identity(
+    secure_client,
+    insecure_client,
+    semaphore,
+    site,
+):
     domain = site["domain"]
 
     identity = {
@@ -362,7 +402,12 @@ def get_candidate_identity(site):
         "canonical_domain": "",
     }
 
-    response = fetch_homepage(domain)
+    response = await fetch_homepage(
+        secure_client,
+        insecure_client,
+        semaphore,
+        domain,
+    )
 
     if response is None:
         return identity
@@ -391,7 +436,7 @@ def get_candidate_identity(site):
         and canonical.get("href")
     ):
         canonical_url = urljoin(
-            response.url,
+            str(response.url),
             canonical.get("href"),
         )
 
@@ -402,11 +447,55 @@ def get_candidate_identity(site):
     return identity
 
 
-def build_candidates(sites):
-    return [
-        get_candidate_identity(site)
+async def build_candidates(
+    secure_client,
+    insecure_client,
+    semaphore,
+    sites,
+):
+    tasks = [
+        get_candidate_identity(
+            secure_client,
+            insecure_client,
+            semaphore,
+            site,
+        )
         for site in sites
     ]
+
+    return await asyncio.gather(
+        *tasks
+    )
+
+
+async def collect_selected_evidence(
+    secure_client,
+    insecure_client,
+    semaphore,
+    sites,
+):
+    tasks = [
+        collect_evidence(
+            secure_client,
+            insecure_client,
+            semaphore,
+            site["domain"],
+        )
+        for site in sites
+    ]
+
+    results = await asyncio.gather(
+        *tasks,
+        return_exceptions=True,
+    )
+
+    return {
+        site["domain"]: result
+        for site, result in zip(
+            sites,
+            results,
+        )
+    }
 
 
 def create_client():
@@ -677,46 +766,82 @@ def select_sites(
     ]
 
 
-def run_check(sites):
+def print_evidence(
+    site,
+    evidence,
+):
+    domain = site["domain"]
+
+    print("=" * 60)
+    print(domain)
+    print("=" * 60)
+
+    if isinstance(
+        evidence,
+        BaseException,
+    ):
+        print("Fetch: ERROR")
+        print(
+            type(evidence).__name__,
+            str(evidence),
+        )
+        print()
+        return
+
+    print("Fetch: OK")
+    print(
+        "Title:",
+        evidence["title"],
+    )
+
+    print("Headings:")
+
+    for value in evidence["headings"]:
+        print(" -", value)
+
+    print("Logo text:")
+
+    for value in evidence["logo_text"]:
+        print(" -", value)
+
+    print()
+
+
+async def run_check(sites):
     print("\nPRE-FLIGHT CHECK")
+    print(
+        f"Concurrent HTTP requests: up to "
+        f"{MAX_CONCURRENT_REQUESTS}"
+    )
     print("Gemini API calls: 0\n")
 
+    semaphore = asyncio.Semaphore(
+        MAX_CONCURRENT_REQUESTS
+    )
+
+    async with httpx.AsyncClient(
+        headers=HEADERS,
+        timeout=10.0,
+        follow_redirects=True,
+    ) as secure_client:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=10.0,
+            follow_redirects=True,
+            verify=False,
+        ) as insecure_client:
+            evidence_map = await collect_selected_evidence(
+                secure_client,
+                insecure_client,
+                semaphore,
+                sites,
+            )
+
     for site in sites:
-        domain = site["domain"]
-
-        print("=" * 60)
-        print(domain)
-        print("=" * 60)
-
-        try:
-            evidence = collect_evidence(
-                domain
-            )
-
-            print("Fetch: OK")
-            print(
-                "Title:",
-                evidence["title"],
-            )
-
-            print("Headings:")
-
-            for value in evidence["headings"]:
-                print(" -", value)
-
-            print("Logo text:")
-
-            for value in evidence["logo_text"]:
-                print(" -", value)
-
-        except Exception as error:
-            print("Fetch: ERROR")
-            print(
-                type(error).__name__,
-                str(error),
-            )
-
-        print()
+        print_evidence(
+            site,
+            evidence_map[site["domain"]],
+        )
 
     print("Gemini API calls: 0")
     print(
@@ -743,61 +868,50 @@ def save_results(results):
         )
 
 
-def main():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--domain",
-        help="Process one discovered domain",
-    )
-
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Check extraction without Gemini",
-    )
-
-    args = parser.parse_args()
-
-    if not INPUT_FILE.exists():
-        raise FileNotFoundError(
-            f"Input file not found: {INPUT_FILE}"
-        )
-
-    sites = load_sites()
-
-    if not sites:
-        raise RuntimeError(
-            "No sites were loaded from discovered_sites.json."
-        )
-
-    selected = select_sites(
-        sites,
-        args.domain,
-    )
-
-    if not selected:
-        raise RuntimeError(
-            "No matching sites found."
-        )
-
-    if args.check:
-        run_check(
-            selected
-        )
-        return
-
-    client = create_client()
-
+async def run_pipeline(
+    sites,
+    selected,
+):
     print(
         f"Loading {len(sites)} discovered "
         "site identities..."
     )
 
-    candidates = build_candidates(
-        sites
+    semaphore = asyncio.Semaphore(
+        MAX_CONCURRENT_REQUESTS
     )
 
+    async with httpx.AsyncClient(
+        headers=HEADERS,
+        timeout=10.0,
+        follow_redirects=True,
+    ) as secure_client:
+        async with httpx.AsyncClient(
+            headers=HEADERS,
+            timeout=10.0,
+            follow_redirects=True,
+            verify=False,
+        ) as insecure_client:
+            candidates_task = build_candidates(
+                secure_client,
+                insecure_client,
+                semaphore,
+                sites,
+            )
+
+            evidence_task = collect_selected_evidence(
+                secure_client,
+                insecure_client,
+                semaphore,
+                selected,
+            )
+
+            candidates, evidence_map = await asyncio.gather(
+                candidates_task,
+                evidence_task,
+            )
+
+    client = create_client()
     results = []
 
     for site in selected:
@@ -811,13 +925,32 @@ def main():
             f"\nProcessing: {domain}"
         )
 
+        evidence = evidence_map[
+            domain
+        ]
+
+        if isinstance(
+            evidence,
+            BaseException,
+        ):
+            print(
+                "   Error:",
+                type(evidence).__name__,
+                str(evidence),
+            )
+
+            results.append(
+                make_result(
+                    domain=domain,
+                    name=fallback_name,
+                    status="error",
+                )
+            )
+            continue
+
         try:
             print(
                 "1. Extracting small branding evidence..."
-            )
-
-            evidence = collect_evidence(
-                domain
             )
 
             print(
@@ -949,6 +1082,58 @@ def main():
 
     print(
         f"Errors: {errors}"
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--domain",
+        help="Process one discovered domain",
+    )
+
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Check extraction without Gemini",
+    )
+
+    args = parser.parse_args()
+
+    if not INPUT_FILE.exists():
+        raise FileNotFoundError(
+            f"Input file not found: {INPUT_FILE}"
+        )
+
+    sites = load_sites()
+
+    if not sites:
+        raise RuntimeError(
+            "No sites were loaded from discovered_sites.json."
+        )
+
+    selected = select_sites(
+        sites,
+        args.domain,
+    )
+
+    if not selected:
+        raise RuntimeError(
+            "No matching sites found."
+        )
+
+    if args.check:
+        asyncio.run(
+            run_check(selected)
+        )
+        return
+
+    asyncio.run(
+        run_pipeline(
+            sites,
+            selected,
+        )
     )
 
 
