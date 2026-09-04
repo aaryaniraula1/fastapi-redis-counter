@@ -1,12 +1,19 @@
 # Forest Government Crawler
 
-A Scrapy based prototype that crawls official Nepal forest-government 
-websites , finds pages related 
-to organizational structure, acts, reports, and similar topics, and 
-saves them as structured JSON.
+A prototype for discovering official Nepal forest-government websites and identifying their organizational hierarchy.
 
-## Run it
+It uses Scrapy for crawling and Gemini API for extracting organization names and direct parent relationships from website header/branding evidence.
+
+## Run Crawler
+
+```bash
 docker compose up --build
+```
 
-Output is saved to output/forest_data.json (stops automatically after 
-200 relevant pages found).
+## Run Hierarchy Extraction
+
+```bash
+python gemini_hierarchy.py
+```
+
+Hierarchy results are saved to `output/final_hierarchy.json`.
