@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 
 
 const API_BASE_URL = 'http://127.0.0.1:8000'
-
-const ACTIVE_JOB_KEY =
-  'web_scraper_active_job_id'
+const JOBS_STORAGE_KEY = 'web_scraper_jobs'
 
 
 const wait = (milliseconds) =>
@@ -14,260 +12,469 @@ const wait = (milliseconds) =>
   })
 
 
+const loadSavedJobs = () => {
+  try {
+    const storedValue =
+      localStorage.getItem(JOBS_STORAGE_KEY)
+
+    if (!storedValue) {
+      return []
+    }
+
+    const savedJobs = JSON.parse(storedValue)
+
+    if (!Array.isArray(savedJobs)) {
+      return []
+    }
+
+    return savedJobs.map((job) => ({
+      id: job.id,
+      url: job.url,
+      status: 'restoring',
+      result: null,
+      error: '',
+    }))
+  } catch {
+    return []
+  }
+}
+
+
 function App() {
-  const [url, setUrl] = useState('')
-  const [result, setResult] = useState(null)
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [jobId, setJobId] = useState('')
-  const [jobStatus, setJobStatus] = useState('')
+  const [urlInput, setUrlInput] = useState('')
+  const [jobs, setJobs] = useState(loadSavedJobs)
+  const [formError, setFormError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const activePolls = useRef(new Set())
 
 
-  const pollJob = useCallback(
-    async (
-      currentJobId,
-      shouldStop = () => false
-    ) => {
-      for (
-        let attempt = 0;
-        attempt < 120;
-        attempt += 1
-      ) {
-        if (shouldStop()) {
-          return null
-        }
-
-        const response = await fetch(
-          `${API_BASE_URL}/api/jobs/${currentJobId}`
+  const updateJob = useCallback(
+    (jobId, updates) => {
+      setJobs((currentJobs) =>
+        currentJobs.map((job) =>
+          job.id === jobId
+            ? {
+                ...job,
+                ...updates,
+              }
+            : job
         )
-
-        const data = await response.json()
-
-        if (!response.ok) {
-          if (response.status === 404) {
-            localStorage.removeItem(
-              ACTIVE_JOB_KEY
-            )
-
-            setJobId('')
-            setJobStatus('')
-          }
-
-          throw new Error(
-            data.detail ||
-              'Failed to check scraping job'
-          )
-        }
-
-        if (shouldStop()) {
-          return null
-        }
-
-        setJobStatus(data.status)
-
-        if (data.status === 'finished') {
-          return data.result
-        }
-
-        if (data.status === 'failed') {
-          throw new Error(
-            data.error ||
-              'Scraping job failed'
-          )
-        }
-
-        await wait(1000)
-      }
-
-      throw new Error(
-        'Scraping job did not finish in time'
       )
     },
     []
   )
 
 
-  useEffect(() => {
-    const savedJobId = localStorage.getItem(
-      ACTIVE_JOB_KEY
-    )
+  const removeJob = useCallback(
+    (jobId) => {
+      setJobs((currentJobs) =>
+        currentJobs.filter(
+          (job) => job.id !== jobId
+        )
+      )
+    },
+    []
+  )
 
-    if (!savedJobId) {
-      return
-    }
 
-    let cancelled = false
+  const pollJob = useCallback(
+    async (jobId) => {
+      if (activePolls.current.has(jobId)) {
+        return
+      }
 
-
-    const resumeJob = async () => {
-      setJobId(savedJobId)
-      setResult(null)
-      setError('')
-      setLoading(true)
+      activePolls.current.add(jobId)
 
       try {
-        const restoredResult = await pollJob(
-          savedJobId,
-          () => cancelled
-        )
+        while (true) {
+          const response = await fetch(
+            `${API_BASE_URL}/api/jobs/${jobId}`
+          )
 
-        if (
-          !cancelled &&
-          restoredResult
-        ) {
-          setResult(restoredResult)
+          const data = await response.json()
+
+          if (!response.ok) {
+            if (response.status === 404) {
+              removeJob(jobId)
+              return
+            }
+
+            throw new Error(
+              data.detail ||
+                'Could not check job status'
+            )
+          }
+
+          updateJob(jobId, {
+            status: data.status,
+            error: '',
+          })
+
+          if (data.status === 'finished') {
+            updateJob(jobId, {
+              status: 'finished',
+              result: data.result,
+              error: '',
+            })
+
+            return
+          }
+
+          if (data.status === 'failed') {
+            updateJob(jobId, {
+              status: 'failed',
+              result: null,
+              error:
+                data.error ||
+                'Scraping job failed',
+            })
+
+            return
+          }
+
+          await wait(1000)
         }
 
       } catch (error) {
-        if (!cancelled) {
-          setError(error.message)
-        }
+        updateJob(jobId, {
+          status: 'tracking-error',
+          error: error.message,
+        })
 
       } finally {
-        if (!cancelled) {
-          setLoading(false)
-        }
+        activePolls.current.delete(jobId)
       }
-    }
+    },
+    [removeJob, updateJob]
+  )
 
 
-    resumeJob()
+  useEffect(() => {
+    const jobsToSave = jobs.map((job) => ({
+      id: job.id,
+      url: job.url,
+    }))
 
-
-    return () => {
-      cancelled = true
-    }
-  }, [pollJob])
-
-
-  const scrapeWebsite = async (event) => {
-    event.preventDefault()
-
-    setResult(null)
-    setError('')
-    setJobId('')
-    setJobStatus('')
-    setLoading(true)
-
-    localStorage.removeItem(
-      ACTIVE_JOB_KEY
+    localStorage.setItem(
+      JOBS_STORAGE_KEY,
+      JSON.stringify(jobsToSave)
     )
+  }, [jobs])
 
+
+  useEffect(() => {
+    jobs.forEach((job) => {
+      if (
+        job.status === 'restoring' ||
+        job.status === 'queued' ||
+        job.status === 'started'
+      ) {
+        pollJob(job.id)
+      }
+    })
+  }, [jobs, pollJob])
+
+
+  const getUrls = () => {
+    const enteredUrls = urlInput
+      .split(/\n|,/)
+      .map((url) => url.trim())
+      .filter(Boolean)
+
+    return [...new Set(enteredUrls)]
+  }
+
+
+  const isValidUrl = (value) => {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/scrape`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type':
-              'application/json',
-          },
-          body: JSON.stringify({ url }),
-        }
+      const parsedUrl = new URL(value)
+
+      return (
+        parsedUrl.protocol === 'http:' ||
+        parsedUrl.protocol === 'https:'
       )
-
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(
-          data.detail ||
-            'Failed to create scraping job'
-        )
-      }
-
-      setJobId(data.job_id)
-      setJobStatus(data.status)
-
-      localStorage.setItem(
-        ACTIVE_JOB_KEY,
-        data.job_id
-      )
-
-      const scrapedResult =
-        await pollJob(data.job_id)
-
-      if (scrapedResult) {
-        setResult(scrapedResult)
-      }
-
-    } catch (error) {
-      setError(error.message)
-
-    } finally {
-      setLoading(false)
+    } catch {
+      return false
     }
   }
 
 
-  return (
-    <main>
-      <h1>Web Scraper UI</h1>
+  const submitJobs = async (event) => {
+    event.preventDefault()
 
-      <p>
-        Enter a website URL to create a
-        background scraping job.
-      </p>
+    setFormError('')
 
-      <form onSubmit={scrapeWebsite}>
-        <input
-          type="url"
-          placeholder="https://example.com"
-          value={url}
-          onChange={(event) =>
-            setUrl(event.target.value)
+    const urls = getUrls()
+
+    if (urls.length === 0) {
+      setFormError(
+        'Enter at least one website URL.'
+      )
+
+      return
+    }
+
+    const invalidUrls = urls.filter(
+      (url) => !isValidUrl(url)
+    )
+
+    if (invalidUrls.length > 0) {
+      setFormError(
+        'All URLs must start with http:// or https://'
+      )
+
+      return
+    }
+
+    setSubmitting(true)
+
+    try {
+      const requests = urls.map(
+        async (url) => {
+          try {
+            const response = await fetch(
+              `${API_BASE_URL}/api/scrape`,
+              {
+                method: 'POST',
+                headers: {
+                  'Content-Type':
+                    'application/json',
+                },
+                body: JSON.stringify({
+                  url,
+                }),
+              }
+            )
+
+            const data = await response.json()
+
+            if (!response.ok) {
+              throw new Error(
+                data.detail ||
+                  'Failed to create scraping job'
+              )
+            }
+
+            return {
+              success: true,
+              job: {
+                id: data.job_id,
+                url,
+                status: data.status,
+                result: null,
+                error: '',
+              },
+            }
+
+          } catch (error) {
+            return {
+              success: false,
+              url,
+              error: error.message,
+            }
           }
-          required
-        />
+        }
+      )
 
-        <button
-          type="submit"
-          disabled={loading}
-        >
-          {loading
-            ? 'Scraping...'
-            : 'Scrape'}
-        </button>
-      </form>
+      const responses =
+        await Promise.all(requests)
 
-      {jobId && (
-        <p>
-          <strong>Job ID:</strong>{' '}
-          {jobId}
-        </p>
-      )}
+      const createdJobs = responses
+        .filter(
+          (response) => response.success
+        )
+        .map(
+          (response) => response.job
+        )
 
-      {jobStatus && (
-        <p>
-          <strong>Job status:</strong>{' '}
-          {jobStatus}
-        </p>
-      )}
+      const failedRequests = responses.filter(
+        (response) => !response.success
+      )
 
-      {error && (
-        <p>{error}</p>
-      )}
+      if (createdJobs.length > 0) {
+        setJobs((currentJobs) => [
+          ...createdJobs,
+          ...currentJobs,
+        ])
 
-      {result && (
-        <section>
-          <h2>Scraped Result</h2>
+        setUrlInput('')
+      }
 
-          <p>
-            <strong>URL:</strong>{' '}
-            {result.url}
+      if (failedRequests.length > 0) {
+        setFormError(
+          `${failedRequests.length} URL request(s) could not be queued.`
+        )
+      }
+
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+
+  const finishedJobCount = jobs.filter(
+    (job) => job.status === 'finished'
+  ).length
+
+
+  return (
+    <main className="app-shell">
+      <section className="hero">
+        <div>
+          <h1>Web Scraper UI</h1>
+
+          <p className="subtitle">
+            Submit URLs and track scraping tasks.
           </p>
+        </div>
 
-          <p>
-            <strong>Title:</strong>{' '}
-            {result.title || 'Not found'}
-          </p>
+        <div className="summary">
+          <div className="summary-card">
+            <span>Completed</span>
+            <strong>{finishedJobCount}</strong>
+          </div>
+        </div>
+      </section>
 
-          <p>
-            <strong>Description:</strong>{' '}
-            {result.description ||
-              'Not found'}
-          </p>
-        </section>
-      )}
+
+      <section className="scrape-panel">
+        <form onSubmit={submitJobs}>
+          <label htmlFor="urls">
+            Website URLs
+          </label>
+
+          <textarea
+            id="urls"
+            rows="5"
+            value={urlInput}
+            onChange={(event) =>
+              setUrlInput(event.target.value)
+            }
+          />
+
+          {formError && (
+            <p className="form-error">
+              {formError}
+            </p>
+          )}
+
+          <button
+            className="primary-button"
+            type="submit"
+            disabled={submitting}
+          >
+            {submitting
+              ? 'Adding...'
+              : 'Start Scraping'}
+          </button>
+        </form>
+      </section>
+
+
+      <section className="jobs-section">
+        <div className="jobs-heading">
+          <h2>Results</h2>
+        </div>
+
+
+        {jobs.length === 0 ? (
+          <div className="empty-state">
+            <p>No results yet.</p>
+          </div>
+        ) : (
+          <div className="jobs-grid">
+            {jobs.map((job) => (
+              <article
+                className="job-card"
+                key={job.id}
+              >
+                <div className="job-card-header">
+                  <span
+                    className={
+                      `status-badge status-${job.status}`
+                    }
+                  >
+                    {job.status === 'tracking-error'
+                      ? 'tracking error'
+                      : job.status}
+                  </span>
+
+                  <span className="job-id">
+                    {job.id}
+                  </span>
+                </div>
+
+
+                <p className="job-url">
+                  {job.url}
+                </p>
+
+
+                {job.status === 'queued' && (
+                  <p className="job-message">
+                    Waiting...
+                  </p>
+                )}
+
+
+                {job.status === 'started' && (
+                  <p className="job-message">
+                    Scraping...
+                  </p>
+                )}
+
+
+                {job.status === 'restoring' && (
+                  <p className="job-message">
+                    Restoring...
+                  </p>
+                )}
+
+
+                {job.status === 'finished' &&
+                  job.result && (
+                    <div className="result-box">
+                      <div>
+                        <span>Title</span>
+
+                        <p>
+                          {job.result.title ||
+                            'Not found'}
+                        </p>
+                      </div>
+
+                      <div>
+                        <span>Description</span>
+
+                        <p>
+                          {job.result.description ||
+                            'Not found'}
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+
+                {job.status === 'failed' && (
+                  <div className="error-box">
+                    {job.error ||
+                      'Scraping failed'}
+                  </div>
+                )}
+
+
+                {job.status ===
+                  'tracking-error' && (
+                  <div className="error-box">
+                    {job.error}
+                  </div>
+                )}
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
     </main>
   )
 }
