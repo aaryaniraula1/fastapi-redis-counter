@@ -1,74 +1,119 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import requests
-from bs4 import BeautifulSoup
+from pydantic import BaseModel, HttpUrl
+from redis.exceptions import RedisError
+from rq import Retry
+from rq.exceptions import NoSuchJobError
+from rq.job import Job
 
-app = FastAPI()
+from api.queue import redis_connection, scrape_queue
+from api.tasks import scrape_website
+
+
+app = FastAPI(
+    title="Web Scraper API"
+)
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
 
 class ScrapeRequest(BaseModel):
-    url: str
+    url: HttpUrl
 
 
 @app.get("/api/health")
 def health_check():
-    return {"message": "FastAPI is connected"}
-
-
-@app.post("/api/scrape")
-def scrape_page(request: ScrapeRequest):
-    url = request.url.strip()
-
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="URL must start with http:// or https://"
-        )
-
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
-
     try:
-        response = requests.get(
-            url,
-            headers=headers,
-            timeout=10
-        )
-        response.raise_for_status()
+        redis_connection.ping()
 
-    except requests.exceptions.RequestException as error:
+    except RedisError as error:
         raise HTTPException(
-            status_code=400,
-            detail=f"Could not scrape URL: {error}"
-        )
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    title_tag = soup.find("title")
-    title = title_tag.get_text(strip=True) if title_tag else None
-
-    description_tag = soup.find(
-        "meta",
-        attrs={"name": "description"}
-    )
-
-    description = (
-        description_tag.get("content", "").strip()
-        if description_tag
-        else None
-    )
+            status_code=503,
+            detail="Redis is unavailable",
+        ) from error
 
     return {
-        "url": url,
-        "title": title,
-        "description": description,
+        "message": "FastAPI and Redis are connected"
     }
+
+
+@app.post(
+    "/api/scrape",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_scrape_job(request: ScrapeRequest):
+    url = str(request.url)
+
+    try:
+        job = scrape_queue.enqueue(
+            scrape_website,
+            url,
+            job_timeout=30,
+            result_ttl=600,
+            failure_ttl=600,
+            retry=Retry(max=2),
+        )
+
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not connect to the job queue",
+        ) from error
+
+    return {
+        "job_id": job.id,
+        "status": "queued",
+    }
+
+
+@app.get("/api/jobs/{job_id}")
+def get_scrape_job(job_id: str):
+    try:
+        job = Job.fetch(
+            job_id,
+            connection=redis_connection,
+        )
+
+        job_status = job.get_status(
+            refresh=True
+        )
+
+    except NoSuchJobError as error:
+        raise HTTPException(
+            status_code=404,
+            detail="Job not found",
+        ) from error
+
+    except RedisError as error:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not connect to the job queue",
+        ) from error
+
+    status_value = (
+        job_status.value
+        if hasattr(job_status, "value")
+        else str(job_status)
+    )
+
+    response = {
+        "job_id": job.id,
+        "status": status_value,
+    }
+
+    if status_value == "finished":
+        response["result"] = job.result
+
+    elif status_value == "failed":
+        response["error"] = "Scraping job failed"
+
+    return response
