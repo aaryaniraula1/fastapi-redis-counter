@@ -1,3 +1,5 @@
+from uuid import uuid4
+
 from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl
@@ -53,10 +55,13 @@ def health_check():
 def create_scrape_job(request: ScrapeRequest):
     url = str(request.url)
 
+    job_id = f"UI-{uuid4().hex[:9]}"
+
     try:
         job = scrape_queue.enqueue(
             scrape_website,
             url,
+            job_id=job_id,
             job_timeout=30,
             result_ttl=600,
             failure_ttl=600,
