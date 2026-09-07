@@ -1,6 +1,6 @@
 # Web Scraper UI
 
-A React + Vite frontend running in a Docker container and connected to a FastAPI backend.
+A React + Vite web scraper connected to a FastAPI backend and using Redis Queue (RQ) for background scraping jobs.
 
 ## Tech Stack
 
@@ -8,8 +8,13 @@ A React + Vite frontend running in a Docker container and connected to a FastAPI
 * Vite
 * FastAPI
 * Python
+* Redis
+* RQ
+* Requests
+* BeautifulSoup
 * Docker
 * Docker Compose
+* Pytest
 
 ## Setup and Run
 
@@ -19,7 +24,13 @@ A React + Vite frontend running in a Docker container and connected to a FastAPI
 python -m pip install -r requirements.txt
 ```
 
-### 2. Run FastAPI
+### 2. Run the Application
+
+Make sure Docker Desktop is running:
+
+```bash
+docker compose up --build
+```
 
 FastAPI runs at:
 
@@ -27,19 +38,38 @@ FastAPI runs at:
 http://127.0.0.1:8000
 ```
 
-### 3. Run the Vite Container
-
-Make sure Docker Desktop is running, then open another terminal:
-
-```bash
-docker compose up --build
-```
-
-Open the frontend at:
+Frontend runs at:
 
 ```text
 http://localhost:5173
 ```
 
-Click **Check API Connection** to verify the connection with FastAPI.
+### 3. Scrape a Website
+
+Enter a website URL in the empty field and click **Scrape**.
+
+FastAPI queues the scraping job using RQ, the worker processes it in the background, and the frontend displays the job status and scraped result.
+
+## API
+
+Create a scraping job:
+
+```text
+POST /api/scrape
+```
+
+Check job status:
+
+```text
+GET /api/jobs/{job_id}
+```
+
+Possible statuses:
+
+```text
+queued
+started
+finished
+failed
+```
 
